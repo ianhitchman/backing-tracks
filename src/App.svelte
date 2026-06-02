@@ -13,6 +13,7 @@
     FlagTriangleRight,
     Repeat,
     ChevronsLeftRightEllipsis,
+    SlidersHorizontal,
   } from "lucide-svelte";
 
   // State
@@ -25,6 +26,7 @@
   let duration = 0;
   let showFileSelector = false;
   let showChannelSelector = false;
+  let showEffectsDialog = false;
   let activeChannel = "left";
   let folderName = "";
   let waveformData = [];
@@ -45,6 +47,10 @@
 
   // Seeking state
   let isSeeking = false;
+
+  // Effects state (pitch and tempo)
+  let pitchShift = 0; // in semitones
+  let tempoRate = 100; // percentage (100 = normal speed)
 
   onMount(async () => {
     // Load saved state
@@ -191,6 +197,9 @@
     await audioEngine.loadFile(file);
     showFileSelector = false;
 
+    // Reset effects when changing songs
+    resetEffects();
+
     // Generate waveform with more detail
     waveformData = await audioEngine.getWaveformData(file, 800);
     drawWaveform();
@@ -297,10 +306,9 @@
   }
 
   function openFileSelector() {
+    showFileSelector = true;
     if (files.length === 0) {
       selectFolder();
-    } else {
-      showFileSelector = true;
     }
   }
 
@@ -339,6 +347,33 @@
     saveState(STORAGE_KEYS.ACTIVE_CHANNEL, channel);
     showChannelSelector = false;
   }
+
+  function openEffectsDialog() {
+    showEffectsDialog = true;
+  }
+
+  function closeEffectsDialog() {
+    showEffectsDialog = false;
+  }
+
+  function updatePitch(e) {
+    pitchShift = parseFloat(e.target.value);
+    audioEngine.setPitchShift(pitchShift);
+  }
+
+  function updateTempo(e) {
+    tempoRate = parseFloat(e.target.value);
+    audioEngine.setTempoRate(tempoRate / 100);
+  }
+
+  function resetEffects() {
+    pitchShift = 0;
+    tempoRate = 100;
+    audioEngine.setPitchShift(0);
+    audioEngine.setTempoRate(1.0);
+  }
+
+  $: effectsActive = pitchShift !== 0 || tempoRate !== 100;
 </script>
 
 {#if showFileSelector}
@@ -353,9 +388,17 @@
 
 <div class="player">
   <!-- Header with title -->
-  <div class="header" on:click={openFileSelector}>
-    <h1 class="title">{currentTitle}</h1>
-    <div class="folder-name">{folderName || "No folder selected"}</div>
+  <div class="header">
+    <div class="header-content" on:click={openFileSelector}>
+      <h1 class="title">{currentTitle}</h1>
+    </div>
+    <button
+      class="effects-btn {effectsActive ? 'active' : ''}"
+      on:click={openEffectsDialog}
+      title="Pitch & Tempo"
+    >
+      <SlidersHorizontal size={24} />
+    </button>
   </div>
 
   <!-- Main play button -->
@@ -580,6 +623,58 @@
   </div>
 {/if}
 
+{#if showEffectsDialog}
+  <div class="effects-overlay">
+    <div class="effects-dialog">
+      <div class="effects-header">
+        <h2>Pitch & Tempo</h2>
+        <button class="close-btn-icon" on:click={closeEffectsDialog}>✕</button>
+      </div>
+
+      <div class="effects-content">
+        <div class="effect-control">
+          <label>Pitch Shift</label>
+          <div class="effect-value">
+            {pitchShift > 0 ? "+" : ""}{pitchShift.toFixed(2)} semitones
+          </div>
+          <input
+            type="range"
+            class="effect-slider"
+            min="-12"
+            max="12"
+            step="0.25"
+            value={pitchShift}
+            on:input={updatePitch}
+          />
+          <div class="effect-range">-12 to +12 semitones</div>
+        </div>
+
+        <div class="effect-control">
+          <label>Tempo</label>
+          <div class="effect-value">{tempoRate}%</div>
+          <input
+            type="range"
+            class="effect-slider"
+            min="50"
+            max="200"
+            step="5"
+            value={tempoRate}
+            on:input={updateTempo}
+          />
+          <div class="effect-range">50% to 200%</div>
+        </div>
+      </div>
+
+      <div class="effects-footer">
+        <button class="reset-btn" on:click={resetEffects}
+          >Reset to Default</button
+        >
+        <button class="done-btn" on:click={closeEffectsDialog}>Done</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .player {
     display: flex;
@@ -587,28 +682,55 @@
     height: 100dvh;
     padding: 1rem;
     gap: 1.5rem;
-    justify-content: space-between;
+    /* justify-content: space-between; */
   }
 
   .header {
-    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 1.5rem;
     background: var(--bg-secondary);
+    gap: 1rem;
+  }
+
+  .header-content {
+    flex: 1;
+    text-align: center;
     cursor: pointer;
     user-select: none;
   }
 
-  .header:active {
-    background: var(--bg-tertiary);
+  .header-content:active {
+    opacity: 0.8;
   }
 
   .title {
     font-size: 1.75rem;
     font-weight: 600;
-    margin-bottom: 0.5rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .effects-btn {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    width: 3rem;
+    height: 3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    flex-shrink: 0;
+  }
+
+  .effects-btn.active {
+    background: var(--accent-primary);
+  }
+
+  .effects-btn:active {
+    opacity: 0.8;
   }
 
   .folder-name {
@@ -661,7 +783,7 @@
   }
 
   .seek-section {
-    padding: 0 1rem;
+    padding: 0;
   }
 
   .time-display {
@@ -1034,5 +1156,172 @@
 
   .channel-selector .close-btn:active {
     background: var(--bg-secondary);
+  }
+
+  /* Effects Dialog */
+  .effects-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--bg-primary);
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    padding: 2rem;
+  }
+
+  .effects-dialog {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .effects-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2rem;
+  }
+
+  .effects-header h2 {
+    font-size: 2rem;
+    font-weight: 600;
+  }
+
+  .close-btn-icon {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 1.5rem;
+    width: 3rem;
+    height: 3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .close-btn-icon:active {
+    background: var(--bg-secondary);
+  }
+
+  .effects-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 3rem;
+    padding: 2rem 0;
+  }
+
+  .effect-control {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .effect-control label {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .effect-value {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--accent-primary);
+    text-align: center;
+  }
+
+  .effect-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 50px;
+    background: var(--bg-secondary);
+    outline: none;
+  }
+
+  .effect-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 30px;
+    height: 50px;
+    background: var(--accent-primary);
+    cursor: pointer;
+  }
+
+  .effect-slider::-moz-range-thumb {
+    width: 30px;
+    height: 50px;
+    background: var(--accent-primary);
+    cursor: pointer;
+    border: none;
+  }
+
+  .effect-range {
+    font-size: 1rem;
+    color: var(--text-secondary);
+    text-align: center;
+  }
+
+  .effects-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-top: 2rem;
+  }
+
+  .reset-btn,
+  .done-btn {
+    font-size: 1.25rem;
+    font-weight: 600;
+    padding: 1.5rem;
+  }
+
+  .reset-btn {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .reset-btn:active {
+    background: var(--bg-secondary);
+  }
+
+  .done-btn {
+    background: var(--accent-primary);
+    color: var(--text-primary);
+  }
+
+  .done-btn:active {
+    opacity: 0.8;
+  }
+
+  /* Mobile responsive - smaller icons */
+  @media (max-width: 500px) {
+    .control-btn {
+      width: 2rem;
+      height: 2rem;
+    }
+
+    .play-btn {
+      width: 4rem;
+      height: 4rem;
+    }
+
+    .control-btn :global(svg) {
+      width: 14px !important;
+      height: 14px !important;
+    }
+
+    .play-btn :global(svg) {
+      width: 24px !important;
+      height: 24px !important;
+    }
+
+    .channel-switch-btn :global(svg) {
+      width: 12px !important;
+      height: 12px !important;
+    }
   }
 </style>

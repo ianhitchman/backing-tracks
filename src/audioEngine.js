@@ -14,6 +14,10 @@ export class AudioEngine {
     this.channel1Mix = { left: 1.0, right: 0.0 }; // Ch1 = 100% left input
     this.channel2Mix = { left: 0.0, right: 1.0 }; // Ch2 = 100% right input
 
+    // Effects settings
+    this.pitchShift = 0; // in semitones
+    this.tempoRate = 1.0; // 1.0 = normal speed
+
     this.initialized = false;
   }
 
@@ -197,6 +201,40 @@ export class AudioEngine {
     if (this.audioElement) {
       this.audioElement.addEventListener(event, callback);
     }
+  }
+
+  setPitchShift(semitones) {
+    // Store pitch shift value for future implementation
+    this.pitchShift = semitones;
+    this.updatePlaybackRate();
+  }
+
+  setTempoRate(rate) {
+    // Store tempo rate (1.0 = normal, 0.5 = half speed, 2.0 = double speed)
+    this.tempoRate = rate;
+    this.updatePlaybackRate();
+  }
+
+  updatePlaybackRate() {
+    if (!this.audioElement) return;
+
+    // For now, use a combined approach:
+    // playbackRate affects both pitch and tempo
+    // We'll use playbackRate for tempo and compensate pitch later
+    const tempoMultiplier = this.tempoRate || 1.0;
+    const pitchMultiplier = this.pitchShift
+      ? Math.pow(2, this.pitchShift / 12)
+      : 1.0;
+
+    // For independent control, we'd need to:
+    // 1. Use playbackRate for tempo
+    // 2. Apply pitch shifting separately to compensate
+    // For now, this is a simplified version
+    this.audioElement.playbackRate = tempoMultiplier;
+
+    // TODO: Add independent pitch shifting using soundtouchjs or similar
+    // This would require processing the audio through a pitch shifter
+    // while keeping the tempo constant
   }
 
   removeEventListener(event, callback) {
