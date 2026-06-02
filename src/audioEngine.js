@@ -1,9 +1,9 @@
-// Web Audio API engine for stereo channel mixing and routing
+// Web Audio API engine with soundtouchjs for independent pitch/tempo control
+import { SoundTouch, SimpleFilter, WebAudioBufferSource } from 'soundtouchjs';
 
 export class AudioEngine {
   constructor() {
     this.audioContext = null;
-    this.audioElement = null;
     this.sourceNode = null;
     this.splitter = null;
     this.merger = null;
@@ -18,7 +18,25 @@ export class AudioEngine {
     this.pitchShift = 0; // in semitones
     this.tempoRate = 1.0; // 1.0 = normal speed
 
+    // Audio buffer management
+    this.originalBuffer = null;
+    this.processedBuffer = null;
+    this.isPlaying = false;
+    this.startTime = 0;
+    this.pausedAt = 0;
+    this.currentTime = 0;
+    
+    // Event callbacks
+    this.eventCallbacks = {
+      play: [],
+      pause: [],
+      timeupdate: [],
+      ended: [],
+      durationchange: [],
+    };
+
     this.initialized = false;
+    this.updateInterval = null;
   }
 
   async init() {
@@ -29,15 +47,6 @@ export class AudioEngine {
       window.AudioContext || window.webkitAudioContext
     )();
 
-    // Create audio element
-    this.audioElement = new Audio();
-    this.audioElement.crossOrigin = "anonymous";
-
-    // Create Web Audio nodes
-    this.sourceNode = this.audioContext.createMediaElementSource(
-      this.audioElement,
-    );
-
     // Splitter splits stereo input into separate L/R channels
     this.splitter = this.audioContext.createChannelSplitter(2);
 
@@ -47,9 +56,6 @@ export class AudioEngine {
 
     // Merger combines channels back to stereo output
     this.merger = this.audioContext.createChannelMerger(2);
-
-    // Connect: source -> splitter
-    this.sourceNode.connect(this.splitter);
 
     // We'll set up the mixing connections
     this.updateMixing();
@@ -125,9 +131,102 @@ export class AudioEngine {
       await this.audioContext.resume();
     }
 
-    const url = URL.createObjectURL(file);
-    this.audioElement.src = url;
-    await this.audioElement.load();
+    // Stop current playback
+    this.stop();
+
+    // Load and decode audio file
+    const arrayBuffer = await file.arrayBuffer();
+    this.originalBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
+    
+    // Process with current effects settings
+    await this.processAudio();
+    
+    // Reset playback state
+    this.pausedAt = 0;
+    this.currentTime = 0;
+    
+    // Trigger duration change event
+    this.triggerEvent('durationchange');
+  }
+
+  async processAudio() {
+    if (!this.originalBuffer) return;
+
+    // If no effects are active, use original buffer
+    if (this.pitchShift === 0 && this.tempoRate === 1.0) {
+      this.processedBuffer = this.originalBuffer;
+      return;
+    }
+
+    console.log('Processing audio with pitch:', this.pitchShift, 'semitones, tempo:', this.tempoRate);
+
+    try {
+      const sampleRate = this.originalBuffer.sampleRate;
+      const numberOfChannels = this.originalBuffer.numberOfChannels;
+      
+      // Create SoundTouch instance and configure it
+      const soundTouch = new SoundTouch();
+      soundTouch.pitchSemitones = this.pitchShift;
+      soundTouch.tempo = this.tempoRate;
+      
+      console.log('SoundTouch configured: pitchSemitones=', this.pitchShift, 'tempo=', this.tempoRate);
+      
+      // Create source from buffer
+      const source = new WebAudioBufferSource(this.originalBuffer);
+      
+      // Create filter with source and soundtouch
+      const filter = new SimpleFilter(source, soundTouch);
+      
+      // Process audio in frames (stereo)
+      const processedSamples = [];
+      const batchSize = 4096; // frames, not samples
+      const tempBuffer = new Float32Array(batchSize * 2); // interleaved stereo
+      
+      let totalFrames = 0;
+      while (true) {
+        const framesExtracted = filter.extract(tempBuffer, batchSize);
+        if (framesExtracted === 0) break;
+        
+        // Store the interleaved stereo samples
+        for (let i = 0; i < framesExtracted * 2; i++) {
+          processedSamples.push(tempBuffer[i]);
+        }
+        totalFrames += framesExtracted;
+      }
+      
+      console.log('Extracted', totalFrames, 'frames,', processedSamples.length, 'samples total');
+      
+      // Ensure we got valid data
+      if (processedSamples.length === 0) {
+        console.warn('Audio processing produced no output, using original buffer');
+        this.processedBuffer = this.originalBuffer;
+        return;
+      }
+      
+      // Create new audio buffer with processed data
+      // De-interleave the stereo data back into separate channels
+      this.processedBuffer = this.audioContext.createBuffer(
+        numberOfChannels,
+        totalFrames,
+        sampleRate
+      );
+      
+      const leftChannel = this.processedBuffer.getChannelData(0);
+      const rightChannel = numberOfChannels > 1 ? this.processedBuffer.getChannelData(1) : leftChannel;
+      
+      for (let i = 0; i < totalFrames; i++) {
+        leftChannel[i] = processedSamples[i * 2];
+        if (numberOfChannels > 1) {
+          rightChannel[i] = processedSamples[i * 2 + 1];
+        }
+      }
+      
+      console.log('Audio processing complete, duration:', this.processedBuffer.duration);
+    } catch (error) {
+      console.error('Error processing audio with effects:', error);
+      // Fall back to original buffer if processing fails
+      this.processedBuffer = this.originalBuffer;
+    }
   }
 
   async getWaveformData(file, samples = 500) {
@@ -168,73 +267,203 @@ export class AudioEngine {
   }
 
   play() {
-    if (this.audioElement) {
-      return this.audioElement.play();
+    if (!this.processedBuffer || this.isPlaying) return Promise.resolve();
+
+    // Resume audio context if needed
+    if (this.audioContext.state === 'suspended') {
+      this.audioContext.resume();
     }
+
+    // Stop any existing source
+    if (this.sourceNode) {
+      // Clear the onended handler to prevent it from interfering
+      this.sourceNode.onended = null;
+      try {
+        this.sourceNode.stop();
+      } catch (e) {
+        // Source might already be stopped
+      }
+      this.sourceNode.disconnect();
+    }
+
+    // Create new buffer source
+    this.sourceNode = this.audioContext.createBufferSource();
+    this.sourceNode.buffer = this.processedBuffer;
+    
+    // Connect to audio graph
+    this.sourceNode.connect(this.splitter);
+    
+    // Handle ended event
+    this.sourceNode.onended = () => {
+      if (this.isPlaying) {
+        this.isPlaying = false;
+        this.pausedAt = 0;
+        this.currentTime = 0;
+        this.triggerEvent('ended');
+        this.stopTimeUpdate();
+      }
+    };
+    
+    // Start playback from current position
+    this.startTime = this.audioContext.currentTime - this.pausedAt;
+    this.sourceNode.start(0, this.pausedAt);
+    this.isPlaying = true;
+    
+    this.triggerEvent('play');
+    this.startTimeUpdate();
+    
+    return Promise.resolve();
   }
 
   pause() {
-    if (this.audioElement) {
-      this.audioElement.pause();
+    if (!this.isPlaying) return;
+
+    // Stop the source
+    if (this.sourceNode) {
+      // Clear the onended handler to prevent it from interfering
+      this.sourceNode.onended = null;
+      try {
+        this.sourceNode.stop();
+      } catch (e) {
+        // Source might already be stopped
+      }
     }
+    
+    // Save current position
+    this.pausedAt = this.audioContext.currentTime - this.startTime;
+    this.currentTime = this.pausedAt;
+    this.isPlaying = false;
+    
+    this.triggerEvent('pause');
+    this.stopTimeUpdate();
   }
 
-  get currentTime() {
-    return this.audioElement ? this.audioElement.currentTime : 0;
-  }
-
-  set currentTime(time) {
-    if (this.audioElement) {
-      this.audioElement.currentTime = time;
+  stop() {
+    if (this.sourceNode) {
+      // Clear the onended handler to prevent it from interfering
+      this.sourceNode.onended = null;
+      try {
+        this.sourceNode.stop();
+      } catch (e) {
+        // Already stopped
+      }
+      this.sourceNode.disconnect();
+      this.sourceNode = null;
     }
+    
+    this.isPlaying = false;
+    this.pausedAt = 0;
+    this.currentTime = 0;
+    this.stopTimeUpdate();
   }
 
   get duration() {
-    return this.audioElement ? this.audioElement.duration : 0;
+    return this.processedBuffer ? this.processedBuffer.duration : 0;
   }
 
   get paused() {
-    return this.audioElement ? this.audioElement.paused : true;
+    return !this.isPlaying;
+  }
+  
+  // Getter returns current playback position
+  getCurrentTime() {
+    if (this.isPlaying) {
+      return this.audioContext.currentTime - this.startTime;
+    }
+    return this.pausedAt;
+  }
+  
+  // Setter seeks to new position
+  setCurrentTime(time) {
+    this.seekTo(time);
   }
 
-  addEventListener(event, callback) {
-    if (this.audioElement) {
-      this.audioElement.addEventListener(event, callback);
+  seekTo(time) {
+    const wasPlaying = this.isPlaying;
+    
+    if (this.isPlaying) {
+      this.stop();
+    }
+    
+    this.pausedAt = Math.max(0, Math.min(time, this.duration));
+    
+    if (wasPlaying) {
+      this.play();
     }
   }
 
-  setPitchShift(semitones) {
-    // Store pitch shift value for future implementation
+  startTimeUpdate() {
+    this.stopTimeUpdate();
+    this.updateInterval = setInterval(() => {
+      if (this.isPlaying) {
+        this.currentTime = this.audioContext.currentTime - this.startTime;
+        this.triggerEvent('timeupdate');
+      }
+    }, 100); // Update every 100ms
+  }
+
+  stopTimeUpdate() {
+    if (this.updateInterval) {
+      clearInterval(this.updateInterval);
+      this.updateInterval = null;
+    }
+  }
+
+  addEventListener(event, callback) {
+    if (!this.eventCallbacks[event]) {
+      this.eventCallbacks[event] = [];
+    }
+    this.eventCallbacks[event].push(callback);
+  }
+
+  removeEventListener(event, callback) {
+    if (this.eventCallbacks[event]) {
+      this.eventCallbacks[event] = this.eventCallbacks[event].filter(
+        (cb) => cb !== callback
+      );
+    }
+  }
+
+  triggerEvent(event) {
+    if (this.eventCallbacks[event]) {
+      this.eventCallbacks[event].forEach((callback) => callback());
+    }
+  }
+
+  async setPitchShift(semitones) {
     this.pitchShift = semitones;
-    this.updatePlaybackRate();
+    await this.reprocessAudio();
   }
 
-  setTempoRate(rate) {
-    // Store tempo rate (1.0 = normal, 0.5 = half speed, 2.0 = double speed)
+  async setTempoRate(rate) {
     this.tempoRate = rate;
-    this.updatePlaybackRate();
+    await this.reprocessAudio();
   }
 
-  updatePlaybackRate() {
-    if (!this.audioElement) return;
+  async reprocessAudio() {
+    if (!this.originalBuffer) return;
 
-    // For now, use a combined approach:
-    // playbackRate affects both pitch and tempo
-    // We'll use playbackRate for tempo and compensate pitch later
-    const tempoMultiplier = this.tempoRate || 1.0;
-    const pitchMultiplier = this.pitchShift
-      ? Math.pow(2, this.pitchShift / 12)
-      : 1.0;
+    const wasPlaying = this.isPlaying;
+    const savedTime = this.getCurrentTime();
 
-    // For independent control, we'd need to:
-    // 1. Use playbackRate for tempo
-    // 2. Apply pitch shifting separately to compensate
-    // For now, this is a simplified version
-    this.audioElement.playbackRate = tempoMultiplier;
+    // Stop current playback
+    if (this.isPlaying) {
+      this.stop();
+    }
 
-    // TODO: Add independent pitch shifting using soundtouchjs or similar
-    // This would require processing the audio through a pitch shifter
-    // while keeping the tempo constant
+    // Reprocess audio with new settings
+    await this.processAudio();
+
+    // Restore playback position
+    this.pausedAt = Math.min(savedTime, this.duration);
+    
+    // Trigger duration change event (duration may have changed due to tempo)
+    this.triggerEvent('durationchange');
+
+    // Resume playback if it was playing
+    if (wasPlaying) {
+      this.play();
+    }
   }
 
   removeEventListener(event, callback) {

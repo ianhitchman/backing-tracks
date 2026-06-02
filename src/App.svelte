@@ -22,6 +22,7 @@
   let currentFile = null;
   let currentTitle = "No Track Selected";
   let isPlaying = false;
+  let isLoading = false;
   let currentTime = 0;
   let duration = 0;
   let showFileSelector = false;
@@ -51,6 +52,10 @@
   // Effects state (pitch and tempo)
   let pitchShift = 0; // in semitones
   let tempoRate = 100; // percentage (100 = normal speed)
+  
+  // Debounce timers for effects processing
+  let pitchDebounceTimer = null;
+  let tempoDebounceTimer = null;
 
   onMount(async () => {
     // Load saved state
@@ -108,16 +113,16 @@
 
   function handleTimeUpdate() {
     if (!isSeeking) {
-      currentTime = audioEngine.currentTime;
+      currentTime = audioEngine.getCurrentTime();
 
       // Check if we've reached the out mark
       if (markOut !== null && currentTime >= markOut) {
         if (isLooping && markIn !== null) {
           // Loop back to in point
-          audioEngine.currentTime = markIn;
+          audioEngine.seekTo(markIn);
         } else if (isLooping) {
           // Loop entire track
-          audioEngine.currentTime = 0;
+          audioEngine.seekTo(0);
         } else {
           // Stop at out mark
           audioEngine.pause();
@@ -133,11 +138,11 @@
   function handleEnded() {
     if (isLooping && markIn !== null && markOut !== null) {
       // Loop back to in point
-      audioEngine.currentTime = markIn;
+      audioEngine.seekTo(markIn);
       audioEngine.play();
     } else if (isLooping) {
       // Loop entire track
-      audioEngine.currentTime = 0;
+      audioEngine.seekTo(0);
       audioEngine.play();
     } else {
       isPlaying = false;
@@ -194,18 +199,31 @@
     currentTitle = file.name.replace(/\.(mp3|ogg|flac|wav)$/i, "");
     saveState(STORAGE_KEYS.CURRENT_SONG, file.name);
 
-    await audioEngine.loadFile(file);
+    // Close file selector immediately
     showFileSelector = false;
-
-    // Reset effects when changing songs
-    resetEffects();
-
-    // Generate waveform with more detail
-    waveformData = await audioEngine.getWaveformData(file, 800);
-    drawWaveform();
-
-    // Don't auto-play, let user control playback
+    
+    // Show loading state
+    isLoading = true;
     isPlaying = false;
+    waveformData = [];
+
+    // Load audio file in background
+    try {
+      await audioEngine.loadFile(file);
+
+      // Reset effects when changing songs
+      resetEffects();
+
+      // Generate waveform with more detail
+      waveformData = await audioEngine.getWaveformData(file, 800);
+      drawWaveform();
+    } catch (error) {
+      console.error('Error loading file:', error);
+      currentTitle = 'Error loading file';
+    } finally {
+      // Clear loading state
+      isLoading = false;
+    }
   }
 
   function drawWaveform() {
@@ -271,7 +289,7 @@
 
   function handleSeekEnd() {
     isSeeking = false;
-    audioEngine.currentTime = currentTime;
+    audioEngine.seekTo(currentTime);
   }
 
   function formatTime(seconds) {
@@ -313,15 +331,15 @@
   }
 
   function skipToStart() {
-    audioEngine.currentTime = markIn !== null ? markIn : 0;
+    audioEngine.seekTo(markIn !== null ? markIn : 0);
   }
-
+  
   function rewindSeconds() {
-    audioEngine.currentTime = Math.max(0, audioEngine.currentTime - 5);
+    audioEngine.seekTo(Math.max(0, audioEngine.getCurrentTime() - 5));
   }
-
+  
   function fastForwardSeconds() {
-    audioEngine.currentTime = Math.min(duration, audioEngine.currentTime + 5);
+    audioEngine.seekTo(Math.min(duration, audioEngine.getCurrentTime() + 5));
   }
 
   function setMarkIn() {
@@ -358,17 +376,45 @@
 
   function updatePitch(e) {
     pitchShift = parseFloat(e.target.value);
-    audioEngine.setPitchShift(pitchShift);
+    
+    // Clear existing timer
+    if (pitchDebounceTimer) {
+      clearTimeout(pitchDebounceTimer);
+    }
+    
+    // Schedule audio processing after user stops adjusting (200ms delay)
+    pitchDebounceTimer = setTimeout(() => {
+      audioEngine.setPitchShift(pitchShift);
+    }, 200);
   }
 
   function updateTempo(e) {
     tempoRate = parseFloat(e.target.value);
-    audioEngine.setTempoRate(tempoRate / 100);
+    
+    // Clear existing timer
+    if (tempoDebounceTimer) {
+      clearTimeout(tempoDebounceTimer);
+    }
+    
+    // Schedule audio processing after user stops adjusting (200ms delay)
+    tempoDebounceTimer = setTimeout(() => {
+      audioEngine.setTempoRate(tempoRate / 100);
+    }, 200);
   }
 
   function resetEffects() {
     pitchShift = 0;
     tempoRate = 100;
+    
+    // Clear any pending processing
+    if (pitchDebounceTimer) {
+      clearTimeout(pitchDebounceTimer);
+    }
+    if (tempoDebounceTimer) {
+      clearTimeout(tempoDebounceTimer);
+    }
+    
+    // Reset immediately
     audioEngine.setPitchShift(0);
     audioEngine.setTempoRate(1.0);
   }
@@ -403,11 +449,11 @@
 
   <!-- Main play button -->
   <div class="play-section">
-    <button class="control-btn" on:click={skipToStart} title="Skip to start">
+    <button class="control-btn" on:click={skipToStart} title="Skip to start" disabled={isLoading || !currentFile}>
       <SkipBack size={28} />
     </button>
 
-    <button class="control-btn" on:click={rewindSeconds} title="Rewind 5s">
+    <button class="control-btn" on:click={rewindSeconds} title="Rewind 5s" disabled={isLoading || !currentFile}>
       <Rewind size={28} />
     </button>
 
@@ -415,11 +461,12 @@
       class="control-btn"
       on:click={fastForwardSeconds}
       title="Fast forward 5s"
+      disabled={isLoading || !currentFile}
     >
       <FastForward size={28} />
     </button>
 
-    <button class="play-btn" on:click={togglePlayPause}>
+    <button class="play-btn" on:click={togglePlayPause} disabled={isLoading || !currentFile}>
       {#if isPlaying}
         <Pause size={48} />
       {:else}
@@ -432,6 +479,7 @@
       class:active={markIn !== null}
       on:click={setMarkIn}
       title="Mark in point"
+      disabled={isLoading || !currentFile}
     >
       <FlagTriangleLeft size={28} />
     </button>
@@ -441,6 +489,7 @@
       class:active={markOut !== null}
       on:click={setMarkOut}
       title="Mark out point"
+      disabled={isLoading || !currentFile}
     >
       <FlagTriangleRight size={28} />
     </button>
@@ -450,6 +499,7 @@
       class:active={isLooping}
       on:click={toggleLoop}
       title="Toggle loop"
+      disabled={isLoading || !currentFile}
     >
       <Repeat size={28} />
     </button>
@@ -463,6 +513,12 @@
     </div>
     <div class="waveform-container">
       <canvas bind:this={waveformCanvas} class="waveform-canvas"></canvas>
+      {#if isLoading}
+        <div class="loading-overlay">
+          <div class="loading-spinner"></div>
+          <div class="loading-text">Loading...</div>
+        </div>
+      {/if}
       <input
         type="range"
         class="seek-bar"
@@ -479,6 +535,7 @@
         style="--range-value: {duration > 0
           ? (currentTime / duration) * 100
           : 0}%;"
+        disabled={isLoading}
       />
     </div>
   </div>
@@ -782,6 +839,13 @@
     transform: scale(0.95);
   }
 
+  .control-btn:disabled,
+  .play-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
   .seek-section {
     padding: 0;
   }
@@ -862,6 +926,46 @@
     height: 0;
     background: transparent;
     border: none;
+  }
+
+  .seek-bar:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .loading-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    z-index: 2;
+  }
+
+  .loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--bg-tertiary);
+    border-top-color: var(--accent-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  .loading-text {
+    color: var(--text-primary);
+    font-size: 1rem;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .channels {
